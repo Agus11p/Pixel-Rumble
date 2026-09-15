@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { VIRTUAL_H, VIRTUAL_W } from '../src/core/constants';
-import { MAP_ASCENSO } from '../src/core/map';
+import { MAP_ASCENSO } from '../src/core/maps/ascenso';
 import { objectSize, objectType } from '../src/core/objects/catalog';
 import { checkPlacement } from '../src/core/objects/placement';
 import type { MatchTransport } from '../src/net/MatchChannel';
-import { MatchSession } from '../src/net/MatchSession';
+import { MatchSession, PLAYER_TIMEOUT_MS } from '../src/net/MatchSession';
 import type { MatchSnapshotState } from '../src/net/MatchSession';
 import type { NetMessage } from '../src/net/protocol';
 
@@ -69,6 +69,7 @@ function makeSession(
     roomId: 'sala',
     userId: player.id,
     isHost,
+    mapId: 'ASCENSO',
     // Los bots no corren, asi que nadie llega y nadie suma: la partida la
     // corta el tope de rondas, que aca se achica al numero pedido.
     targetPoints: 2000,
@@ -294,5 +295,295 @@ describe('partidas con problemas de red y de navegador', () => {
     expect(client.state?.phase).toBe('matchEnd');
     const clientObjects = players[0]!.state!.objects.filter((o) => o.ownerId === 'cliente');
     expect(clientObjects).toHaveLength(2);
+  });
+});
+
+/**
+ * Corre `players` hasta que alguno cumpla `until`, o se acaben los frames.
+ * Reusa el mismo reloj falso que el resto del archivo. Los que ya no estan
+ * "conectados" (se les dejo de llamar `update`) simplemente no avanzan mas:
+ * es exactamente como se ve un jugador que cerro la pestana.
+ */
+async function runUntil(
+  players: Player[],
+  until: () => boolean,
+  maxSeconds: number,
+  frameMs = 50,
+): Promise<void> {
+  for (let t = 0; t < maxSeconds * 1000; t += frameMs) {
+    for (const p of players) {
+      p.session.update(NEUTRAL);
+      actAsBot(p);
+    }
+    await vi.advanceTimersByTimeAsync(frameMs);
+    if (until()) return;
+  }
+}
+
+describe('host desconectado en plena partida', () => {
+  useFakeClock();
+
+  it('la carrera sigue: un cliente asume host y nadie se duplica ni se reinicia', async () => {
+    const ids = ['host', 'ana', 'beto'];
+    const net = new MemoryNetwork(60);
+    // Dos rondas: la primera para probar la migracion en plena carrera, la
+    // segunda para confirmar que la partida sigue avanzando con normalidad
+    // despues, sin darle a la ronda extra un presupuesto de tiempo enorme.
+    const players = makePlayers(ids, 2, 60, net);
+    const [host, ana, beto] = players as [Player, Player, Player];
+
+    for (const p of players) await p.session.start();
+    host.session.beginMatch();
+
+    // Llega a la carrera de la ronda 1 (los bots eligen y colocan solos).
+    await runUntil(players, () => ana.state?.phase === 'race', 30);
+    expect(ana.state?.phase).toBe('race');
+    const roundAtDisconnect = ana.state!.round;
+    const objectsBeforeCount = ana.state!.objects.length;
+    const playerIdsBefore = [...ana.session.sim.world.players].map((p) => p.id).sort();
+
+    // El host "se va": se corta su suscripcion y se deja de pumpearlo, como
+    // si se hubiera cerrado la pestana de golpe.
+    await host.session.destroy();
+    const survivors = [ana, beto];
+
+    // La sala ya elige host de forma deterministica por join_order (mismo
+    // mecanismo que en el lobby, hostElection.ts): entre los que quedan,
+    // 'ana' es la de menor orden. Esta es la reaccion que MatchScreen dispara
+    // cuando `room.hostId` cambia: no reinicia nada, solo cambia el rol.
+    ana.session.setHost(true);
+
+    // La carrera sigue para los que quedan hasta terminar la ronda.
+    await runUntil(survivors, () => ana.state?.phase === 'roundResults', 60);
+
+    expect(ana.state?.phase).toBe('roundResults');
+    expect(ana.state?.round).toBe(roundAtDisconnect); // no se reinicio la ronda
+    expect(ana.state?.objects.length).toBe(objectsBeforeCount); // el mapa no se reseteo
+
+    // Ningun jugador se duplico ni desaparecio de la simulacion.
+    const playerIdsAfter = [...ana.session.sim.world.players].map((p) => p.id).sort();
+    expect(playerIdsAfter).toEqual(playerIdsBefore);
+
+    // beto (que nunca fue host) siguio a la nueva autoridad sin quedar colgado.
+    expect(beto.state?.phase).toBe('roundResults');
+    expect(beto.state?.round).toBe(roundAtDisconnect);
+    expect(beto.state?.totals).toEqual(ana.state?.totals);
+
+    // Y la partida puede seguir avanzando rondas con normalidad despues.
+    // (se espera a los dos: el host lo sabe apenas cierra la ronda, beto
+    // recien cuando le llega el mensaje por la red simulada).
+    await runUntil(
+      survivors,
+      () => ana.state?.phase === 'matchEnd' && beto.state?.phase === 'matchEnd',
+      200,
+    );
+    expect(ana.state?.phase).toBe('matchEnd');
+    expect(beto.state?.phase).toBe('matchEnd');
+    expect(beto.state?.totals).toEqual(ana.state?.totals);
+
+    for (const p of survivors) await p.session.destroy();
+  });
+
+  it('tambien se recupera si el host se va en plena colocacion', async () => {
+    const ids = ['host', 'ana', 'beto'];
+    const net = new MemoryNetwork(60);
+    const players = makePlayers(ids, 2, 60, net);
+    const [host, ana, beto] = players as [Player, Player, Player];
+
+    for (const p of players) await p.session.start();
+    host.session.beginMatch();
+
+    await runUntil(players, () => ana.state?.phase === 'placement', 20);
+    expect(ana.state?.phase).toBe('placement');
+
+    await host.session.destroy();
+    const survivors = [ana, beto];
+    ana.session.setHost(true);
+
+    // Sin el host viejo nadie mas coordina el paso de fase salvo el nuevo:
+    // tiene que seguir avanzando hasta la carrera igual.
+    await runUntil(survivors, () => ana.state?.phase === 'race', 30);
+    expect(ana.state?.phase).toBe('race');
+    expect(beto.state?.phase).toBe('race');
+
+    for (const p of survivors) await p.session.destroy();
+  });
+});
+
+describe('jugador (no host) desconectado en plena partida', () => {
+  useFakeClock();
+
+  it('se elimina de la ronda, no bloquea a los demas y no cobra como si hubiera llegado', async () => {
+    const ids = ['host', 'ana', 'beto'];
+    const net = new MemoryNetwork(60);
+    const players = makePlayers(ids, 5, 60, net);
+    const [host, ana, beto] = players as [Player, Player, Player];
+
+    for (const p of players) await p.session.start();
+    host.session.beginMatch();
+
+    await runUntil(players, () => host.state?.phase === 'race', 30);
+    expect(host.state?.phase).toBe('race');
+
+    // 'ana' se va: se corta su conexion y se deja de pumpearla.
+    await ana.session.destroy();
+    const survivors = [host, beto];
+    // El host es quien detecta la desconexion via presencia (la misma que ya
+    // usa la sala para elegir host, no se abre nada nuevo).
+    host.session.setConnected(new Set(['host', 'beto']));
+
+    // Antes del umbral de tolerancia todavia no la da por desconectada.
+    await runUntil(survivors, () => false, (PLAYER_TIMEOUT_MS - 1000) / 1000, 200);
+    const anaEarly = host.session.sim.world.players.find((p) => p.id === 'ana')!;
+    expect(anaEarly.phase).toBe('racing');
+
+    // Pasado el umbral, la marca eliminada como si se hubiera rendido.
+    await runUntil(
+      survivors,
+      () => host.session.sim.world.players.find((p) => p.id === 'ana')!.phase !== 'racing',
+      (PLAYER_TIMEOUT_MS + 3000) / 1000,
+      200,
+    );
+
+    const anaOnHost = host.session.sim.world.players.find((p) => p.id === 'ana')!;
+    expect(anaOnHost.phase).toBe('dead');
+    expect(anaOnHost.killedBy).toBe(null);
+
+    // El mensaje 'left' del host llega a los demas clientes y ahi tambien
+    // queda eliminada: mismo mundo para todos, sin errores de rollback.
+    await runUntil(
+      survivors,
+      () => beto.session.sim.world.players.find((p) => p.id === 'ana')!.phase !== 'racing',
+      5,
+    );
+    const anaOnBeto = beto.session.sim.world.players.find((p) => p.id === 'ana')!;
+    expect(anaOnBeto.phase).toBe('dead');
+    expect(anaOnBeto.endTick).toBe(anaOnHost.endTick);
+
+    // Que se haya ido no bloquea que la ronda termine (via timeout de carrera,
+    // igual que si nunca hubiera estado): no queda esperandola para siempre.
+    await runUntil(survivors, () => host.state?.phase === 'roundResults', 60);
+    expect(host.state?.phase).toBe('roundResults');
+
+    // Y no cobra puntos como si hubiera llegado a la meta.
+    const anaOutcome = host.state!.roundResult!.outcomes.find((o) => o.id === 'ana')!;
+    expect(anaOutcome.phase).toBe('dead');
+    expect(host.state!.roundResult!.points['ana'] ?? 0).toBe(0);
+
+    for (const p of survivors) await p.session.destroy();
+  });
+
+  it('una partida sin ninguna desconexion sigue funcionando exactamente igual', async () => {
+    // Regresion: los cambios de host/desconexion no deben afectar una
+    // partida normal en la que nadie se cae.
+    const players = makePlayers(['host', 'cliente'], 3, 60);
+    await play(players, 400);
+
+    const [host, client] = players;
+    expect(host!.state?.phase).toBe('matchEnd');
+    expect(client!.state?.phase).toBe('matchEnd');
+    expect(client!.state?.totals).toEqual(host!.state?.totals);
+  });
+});
+
+describe('mapId: infraestructura de multiples mapas', () => {
+  useFakeClock();
+
+  it('dos sesiones con mapId distinto resuelven mundos con geometria distinta', () => {
+    const net = new MemoryNetwork(10);
+    const ascenso = new MatchSession({
+      roomId: 'sala',
+      userId: 'a',
+      isHost: true,
+      mapId: 'ASCENSO',
+      targetPoints: 2000,
+      roundSeconds: 30,
+      getRoster: () => ['a'],
+      transport: net.transport('a'),
+      onState: () => undefined,
+    });
+    const testMap = new MatchSession({
+      roomId: 'sala2',
+      userId: 'b',
+      isHost: true,
+      mapId: 'TEST_MAP',
+      targetPoints: 2000,
+      roundSeconds: 30,
+      getRoster: () => ['b'],
+      transport: net.transport('b'),
+      onState: () => undefined,
+    });
+
+    expect(ascenso.map.id).toBe('ASCENSO');
+    expect(testMap.map.id).toBe('TEST_MAP');
+    expect(ascenso.map.goal).not.toEqual(testMap.map.goal);
+    // MatchSession nunca conoce la geometria de un mapa en particular: solo
+    // resuelve el mapId que le dieron. Ni fisica, ni rollback, ni MatchSession
+    // cambiaron para que esto funcione (criterio de exito de la tarea).
+  });
+
+  it('un mapId no registrado no arranca la partida: falla claro, no en silencio', () => {
+    const net = new MemoryNetwork(10);
+    expect(
+      () =>
+        new MatchSession({
+          roomId: 'sala',
+          userId: 'a',
+          isHost: true,
+          mapId: 'MAPA_QUE_NO_EXISTE',
+          targetPoints: 2000,
+          roundSeconds: 30,
+          getRoster: () => ['a'],
+          transport: net.transport('a'),
+          onState: () => undefined,
+        }),
+    ).toThrow(/MAPA_QUE_NO_EXISTE/);
+  });
+
+  it('si dos clientes terminaran con distinto mapId, el mismatch queda detectado', async () => {
+    // Esto no deberia poder pasar en la app real (el mapId sale de una sola
+    // columna de la sala, la misma para todos), pero MatchSession lo detecta
+    // igual si alguna vez pasara: es la red de seguridad de la §9.
+    const net = new MemoryNetwork(10);
+    const errors: unknown[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args) => {
+      errors.push(args);
+    });
+
+    const host = new MatchSession({
+      roomId: 'sala',
+      userId: 'host',
+      isHost: true,
+      mapId: 'ASCENSO',
+      targetPoints: 2000,
+      roundSeconds: 30,
+      getRoster: () => ['host', 'cliente'],
+      transport: net.transport('host'),
+      onState: () => undefined,
+    });
+    const client = new MatchSession({
+      roomId: 'sala',
+      userId: 'cliente',
+      isHost: false,
+      // A proposito distinto del host, para forzar el caso que nunca deberia
+      // darse en produccion.
+      mapId: 'TEST_MAP',
+      targetPoints: 2000,
+      roundSeconds: 30,
+      getRoster: () => ['host', 'cliente'],
+      transport: net.transport('cliente'),
+      onState: () => undefined,
+    });
+
+    await host.start();
+    await client.start();
+    host.beginMatch();
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(errors.some((e) => String(e).includes('mapId no coincide'))).toBe(true);
+
+    await host.destroy();
+    await client.destroy();
+    spy.mockRestore();
   });
 });

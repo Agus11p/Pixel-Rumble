@@ -53,6 +53,7 @@ describe('eleccion de host', () => {
     id: 'r',
     code: 'K7P2',
     hostId: 'a',
+    mapId: 'ASCENSO',
     targetPoints: 2000,
     roundSeconds: 60,
     status: 'lobby',
@@ -86,5 +87,36 @@ describe('eleccion de host', () => {
 
   it('el host no se reclama a si mismo', () => {
     expect(shouldClaimHost(room, players, new Set(['a']), 'a')).toBe(false);
+  });
+});
+
+describe('mapId en la configuracion de sala', () => {
+  it('mapRoom conserva el map_id que viene de la base', async () => {
+    const { mapRoom } = await import('../src/rooms/roomsApi');
+    const room = mapRoom({
+      id: 'r',
+      code: 'K7P2',
+      host_id: 'a',
+      map_id: 'TEST_MAP',
+      target_points: 2000,
+      round_seconds: 60,
+      status: 'lobby',
+    });
+    expect(room.mapId).toBe('TEST_MAP');
+  });
+
+  it('compatibilidad: una fila vieja sin map_id cae en ASCENSO, no rompe la sala (§13)', async () => {
+    const { mapRoom } = await import('../src/rooms/roomsApi');
+    const { DEFAULT_MAP_ID } = await import('../src/core/maps/registry');
+    // Simula una fila de una sala creada antes de que existiera la columna.
+    const row = {
+      id: 'r',
+      code: 'K7P2',
+      host_id: 'a',
+      target_points: 2000,
+      round_seconds: 60,
+      status: 'lobby',
+    } as Parameters<typeof mapRoom>[0];
+    expect(mapRoom(row).mapId).toBe(DEFAULT_MAP_ID);
   });
 });

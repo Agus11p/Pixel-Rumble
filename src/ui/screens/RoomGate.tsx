@@ -59,7 +59,12 @@ export function RoomGate(): JSX.Element {
           </div>
         }
       >
-        <MatchScreen room={session.room} players={session.players} userId={userId} />
+        <MatchScreen
+          room={session.room}
+          players={session.players}
+          userId={userId}
+          connected={session.connected}
+        />
       </Suspense>
     );
   }

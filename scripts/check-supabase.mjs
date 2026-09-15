@@ -69,12 +69,15 @@ async function main() {
   const { data: created, error: createErr } = await a.client.rpc('create_room', {
     p_name: 'ANFITRION',
     p_password: null,
+    p_map: 'TEST_MAP',
     p_target: 2000,
     p_seconds: 60,
   });
   if (createErr) {
     check('crear sala', false, createErr.message);
-    console.error('\n¿Ejecutaste supabase/migrations/0001_init.sql en el editor SQL?\n');
+    console.error(
+      '\n¿Ejecutaste todas las migraciones de supabase/migrations/ en el editor SQL?\n',
+    );
     process.exit(1);
   }
   const room = created[0];
@@ -84,6 +87,29 @@ async function main() {
     /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{4}$/.test(room.code),
     room.code,
   );
+
+  // --- mapa de la sala -------------------------------------------------------
+  const { data: roomRow } = await a.client
+    .from('rooms')
+    .select('map_id')
+    .eq('id', room.room_id)
+    .maybeSingle();
+  check('la sala guarda el mapId elegido al crearla', roomRow?.map_id === 'TEST_MAP');
+
+  const { data: defaultRoom } = await a.client.rpc('create_room', {
+    p_name: 'ANFITRION2',
+    p_password: null,
+  });
+  const { data: defaultRow } = await a.client
+    .from('rooms')
+    .select('map_id')
+    .eq('id', defaultRoom[0].room_id)
+    .maybeSingle();
+  check(
+    'sin elegir mapa explicitamente, cae en ASCENSO por defecto',
+    defaultRow?.map_id === 'ASCENSO',
+  );
+  await a.client.rpc('leave_room', { p_room: defaultRoom[0].room_id });
 
   // --- unirse --------------------------------------------------------------
   const { data: joined, error: joinErr } = await b.client.rpc('join_room', {
@@ -152,6 +178,26 @@ async function main() {
   });
   check('el host sí puede cambiarla', !hostCfgErr, hostCfgErr?.message ?? '');
 
+  // --- mapa: solo el host, solo en el lobby (§4) -----------------------------
+  const { error: notHostMapErr } = await b.client.rpc('set_map', {
+    p_room: room.room_id,
+    p_map: 'ASCENSO',
+  });
+  check('solo el host cambia el mapa', notHostMapErr?.message?.includes('NOT_HOST'));
+
+  const { error: hostMapErr } = await a.client.rpc('set_map', {
+    p_room: room.room_id,
+    p_map: 'ASCENSO',
+  });
+  check('el host sí puede cambiar el mapa', !hostMapErr, hostMapErr?.message ?? '');
+
+  const { data: afterMap } = await a.client
+    .from('rooms')
+    .select('map_id')
+    .eq('id', room.room_id)
+    .maybeSingle();
+  check('el cambio de mapa quedo guardado', afterMap?.map_id === 'ASCENSO');
+
   // --- control de partida (F4) --------------------------------------------
   const { error: notHostStart } = await b.client.rpc('start_match', { p_room: room.room_id });
   check('solo el host empieza la partida', notHostStart?.message?.includes('NOT_HOST'));
@@ -165,6 +211,16 @@ async function main() {
     .eq('id', room.room_id)
     .maybeSingle();
   check('la sala queda marcada en partida', inMatch?.status === 'in_match');
+
+  // El mapa queda bloqueado una vez arrancada la partida (§4).
+  const { error: mapLockedErr } = await a.client.rpc('set_map', {
+    p_room: room.room_id,
+    p_map: 'TEST_MAP',
+  });
+  check(
+    'el mapa no se puede cambiar con la partida en curso',
+    mapLockedErr?.message?.includes('NOT_HOST'), // status ya no es 'lobby' -> mismo not found/NOT_HOST
+  );
 
   // Quien llega con la carrera empezada mira desde afuera (seccion 10).
   const late = await newPlayer(url, key, 'D');

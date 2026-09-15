@@ -1,5 +1,5 @@
-import { PLAYER_H, VIRTUAL_H, VIRTUAL_W } from './constants';
-import type { GameMap, Solid } from './types';
+import { PLAYER_H, VIRTUAL_H, VIRTUAL_W } from '../constants';
+import type { GameMap, Solid } from '../types';
 
 /**
  * MAPA 01 - "ASCENSO"
@@ -40,7 +40,10 @@ export const PLATFORMS: Solid[] = [
 ];
 
 export const MAP_ASCENSO: GameMap = {
+  id: 'ASCENSO',
   name: 'ASCENSO',
+  width: VIRTUAL_W,
+  height: VIRTUAL_H,
   // Cuatro salidas separadas sobre la plataforma inicial.
   spawns: [
     { x: 10, y: 252 - PLAYER_H },

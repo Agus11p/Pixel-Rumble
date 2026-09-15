@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { approach, moveX, moveY, overlaps } from '../src/core/physics';
 import { createPlayer } from '../src/core/simulation';
-import { MAP_ASCENSO } from '../src/core/map';
+import { MAP_ASCENSO } from '../src/core/maps/ascenso';
 import { PLAYER_H, PLAYER_W } from '../src/core/constants';
 import type { Solid } from '../src/core/types';
 

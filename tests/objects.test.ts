@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { PLAYER_H, TICK_RATE } from '../src/core/constants';
-import { MAP_ASCENSO } from '../src/core/map';
+import { MAP_ASCENSO } from '../src/core/maps/ascenso';
 import { generateOffers, makeRandom, offerCount } from '../src/core/chaosbox';
 import { OBJECT_TYPES, objectSize, objectType, objectsToGeometry } from '../src/core/objects/catalog';
 import { PLACE_GRID, checkPlacement, snap, snapPlacement } from '../src/core/objects/placement';

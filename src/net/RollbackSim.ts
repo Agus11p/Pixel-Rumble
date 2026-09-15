@@ -48,6 +48,16 @@ export class RollbackSim {
   private oldest = 0;
   private rollbacks = 0;
 
+  /**
+   * Jugadores eliminados "fuera de banda" (rendirse, desconexion), con el
+   * tick en el que paso. No son parte del historial de inputs/step normal,
+   * asi que un rollback comun no los reproduciria: por eso se reaplican a
+   * mano despues de cada avance (ver `applyEliminations`). Sin esto, un input
+   * tardio de OTRO jugador podia rebobinar el mundo a un momento anterior a
+   * la eliminacion y "resucitar" al que ya se habia ido.
+   */
+  private readonly eliminated = new Map<string, number>();
+
   constructor(map: GameMap, ids: readonly string[], objects: readonly PlacedObject[] = []) {
     this.world = createWorld(map, ids, objects);
     this.prev = cloneWorldState(this.world);
@@ -124,7 +134,35 @@ export class RollbackSim {
       step(this.world, this.inputsAt(this.world.tick));
       this.states.set(this.world.tick, cloneWorldState(this.world));
     }
+    // Si este avance cruzo el tick de una eliminacion fuera de banda (o vino
+    // de un rollback que la habia "revertido" sin querer), se reaplica aca.
+    this.applyEliminations();
     this.prune();
+  }
+
+  /**
+   * Marca a un jugador como eliminado desde `tick` en adelante, por una razon
+   * que no forma parte de la simulacion determinista normal (rendirse,
+   * desconexion). Es idempotente: la primera eliminacion registrada para un
+   * id gana, llamadas posteriores no hacen nada.
+   */
+  eliminate(id: string, tick: number): void {
+    if (this.eliminated.has(id)) return;
+    this.eliminated.set(id, tick);
+    this.applyEliminations();
+  }
+
+  /** Reaplica todas las eliminaciones fuera de banda cuyo tick ya paso. */
+  private applyEliminations(): void {
+    for (const [id, tick] of this.eliminated) {
+      if (tick > this.world.tick) continue;
+      const p = this.world.players.find((x) => x.id === id);
+      if (!p || p.phase !== 'racing') continue;
+      p.phase = 'dead';
+      p.endTick = tick;
+      p.vx = 0;
+      p.vy = 0;
+    }
   }
 
   private prune(): void {
@@ -150,6 +188,7 @@ export class RollbackSim {
   applyKeyframe(tick: number, players: PlayerState[]): void {
     if (tick < this.world.tick - HISTORY) return;
     restoreWorldState(this.world, tick, players);
+    this.applyEliminations();
     this.states.clear();
     this.states.set(tick, cloneWorldState(this.world));
     this.oldest = tick;

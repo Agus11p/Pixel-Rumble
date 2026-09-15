@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { PLAYER_H, PLAYER_W } from '../src/core/constants';
-import { MAP_ASCENSO, PLATFORMS } from '../src/core/map';
+import { MAP_ASCENSO, PLATFORMS } from '../src/core/maps/ascenso';
 import { createWorld, step } from '../src/core/simulation';
 import type { Solid } from '../src/core/types';
 import { P, input, solo } from './helpers';

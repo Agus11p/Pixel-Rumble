@@ -79,9 +79,23 @@ export interface InputState {
   jump: boolean;
 }
 
-/** Mapa estatico de una pantalla. */
+/**
+ * Mapa estatico de una pantalla.
+ *
+ * Es DATA pura: nada de esto es logica. La fisica, el rollback y el placement
+ * ya reciben un GameMap como parametro (nunca importan un mapa en particular),
+ * asi que agregar un mapa nuevo es escribir esta forma con otros numeros y
+ * registrarlo (ver `core/maps/registry.ts`) - no hay que tocar ningun sistema.
+ */
 export interface GameMap {
+  /** Identificador unico y estable. Es lo que viaja por red y se guarda en la sala. */
+  readonly id: string;
+  /** Nombre para mostrar en pantalla. */
   readonly name: string;
+  /** Ancho del mapa en pixeles virtuales. Hoy siempre VIRTUAL_W (camara fija). */
+  readonly width: number;
+  /** Alto del mapa en pixeles virtuales. Hoy siempre VIRTUAL_H (camara fija). */
+  readonly height: number;
   /** Una posicion de salida por jugador, para que no aparezcan encimados. */
   readonly spawns: readonly { x: number; y: number }[];
   readonly solids: readonly Solid[];

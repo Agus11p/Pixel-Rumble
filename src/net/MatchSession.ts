@@ -1,12 +1,12 @@
 import { MS_PER_TICK, TICK_RATE } from '../core/constants';
 import { generateOffers, offerCount } from '../core/chaosbox';
 import type { Offer } from '../core/chaosbox';
-import { MAP_ASCENSO } from '../core/map';
+import { resolveMap } from '../core/maps/registry';
 import { checkPlacement } from '../core/objects/placement';
 import { everyoneDone } from '../core/simulation';
 import { SCORING, addToTotals, matchIsOver, scoreRound } from '../core/scoring';
 import type { RoundOutcome, RoundScore } from '../core/scoring';
-import type { InputState, PlacedObject, PlayerState } from '../core/types';
+import type { GameMap, InputState, PlacedObject, PlayerState } from '../core/types';
 import { ClockSync } from './clock';
 import { MatchChannel } from './MatchChannel';
 import type { MatchTransport } from './MatchChannel';
@@ -28,6 +28,14 @@ const EARLY_FINISH_MS = 1200;
 const PHASE_HEARTBEAT_MS = 2000;
 /** Ritmo del reloj interno de la sesion, independiente del dibujado. */
 const PUMP_MS = 100;
+/**
+ * Cuanto tiempo tiene que faltar de la presencia de un jugador (no el host)
+ * durante la carrera para darlo por desconectado. Tiene que tolerar un
+ * microcorte de wifi o el cambio a datos moviles en celular sin expulsar a
+ * nadie de prepo, pero sin dejar una ronda esperando para siempre a alguien
+ * que ya no esta.
+ */
+export const PLAYER_TIMEOUT_MS = 8000;
 
 /** Orden natural de las fases dentro de una ronda. */
 const PHASE_ORDER: MatchPhase[] = [
@@ -89,6 +97,8 @@ export interface MatchSessionOptions {
   roomId: string;
   userId: string;
   isHost: boolean;
+  /** Que mapa juega esta partida. Se resuelve una sola vez, al construir. */
+  mapId: string;
   /** Puntos para ganar la partida. */
   targetPoints: number;
   roundSeconds: number;
@@ -125,6 +135,21 @@ export class MatchSession {
 
   private phase: MatchPhase = 'idle';
   private targetPoints: number;
+  /**
+   * Si esta sesion es la autoridad de la partida ahora mismo. A diferencia de
+   * `options.isHost` (fijo, lo que se era al construir la sesion), este campo
+   * cambia con `setHost()` cuando la sala elige un host nuevo en medio de una
+   * partida. Todo lo host-authoritative de aca abajo lee este campo.
+   */
+  private isHost: boolean;
+  /**
+   * Definicion de mapa ya resuelta desde `options.mapId`. Se resuelve UNA
+   * sola vez, al construir la sesion: el mapa no cambia durante la partida
+   * (§11 - todos los rounds usan el mismo). Si `mapId` no esta registrado,
+   * `resolveMap` explota con un mensaje claro antes de llegar aca. Publica y
+   * readonly: la UI la usa para el ghost de colocacion (`session.map`).
+   */
+  readonly map: GameMap;
   private epoch = 1;
   private round = 0;
   private startAt = 0;
@@ -157,14 +182,73 @@ export class MatchSession {
   private lastKeyframe = 0;
   private rtt = 0;
 
+  /**
+   * Presencia conocida de la sala (Presence de Supabase, via useRoomSession).
+   * Es la misma fuente que ya usa la eleccion de host del lobby (§hostElection):
+   * no se abre una conexion nueva, se reutiliza lo que la sala ya sabe.
+   */
+  private connectedIds = new Set<string>();
+  /** True apenas `setConnected` se llamo al menos una vez con datos reales. */
+  private connectedKnown = false;
+  /** Desde cuando (reloj local) cada jugador de la ronda falta en `connectedIds`. */
+  private readonly missingSince = new Map<string, number>();
+  /** Jugadores que este host ya declaro desconectados esta ronda (no repetir). */
+  private readonly eliminatedByDisconnect = new Set<string>();
+
   constructor(options: MatchSessionOptions) {
     this.opts = options;
+    this.isHost = options.isHost;
+    // Se resuelve antes que nada: si el mapId no esta registrado, mejor
+    // fallar aca con un mensaje claro que arrancar con un mundo a medias.
+    this.map = resolveMap(options.mapId);
     this.targetPoints = options.targetPoints;
     this.raceTicks = options.roundSeconds * TICK_RATE;
     this.roster = options.getRoster();
     this.clock = new ClockSync(options.isHost);
-    this.sim = new RollbackSim(MAP_ASCENSO, this.roster);
+    this.sim = new RollbackSim(this.map, this.roster);
     this.channel = options.transport ?? new MatchChannel(options.roomId);
+  }
+
+  /**
+   * Cambia si esta sesion es la autoridad de la partida ahora mismo. La llama
+   * la UI cuando `room.hostId` cambia (la sala ya elige un host nuevo de
+   * forma deterministica y esto se reusa tal cual, ver `hostElection.ts`).
+   *
+   * A proposito NO toca `this.sim`, `this.totals`, `this.placedObjects` ni
+   * ningun otro estado de la partida: el nuevo host ya venia simulando
+   * exactamente lo mismo que todos como cliente, asi que asumir el rol es
+   * instantaneo y no reinicia nada. Solo cambian las responsabilidades que
+   * de verdad dependen de "ser el host": coordinar fases, resolver el Chaos
+   * Box, mandar keyframes y detectar desconexiones.
+   */
+  setHost(isHost: boolean): void {
+    if (this.isHost === isHost) return;
+    this.isHost = isHost;
+    this.clock.setHost(isHost);
+    if (!isHost) return;
+
+    // Epoch nuevo: si el host anterior sigue vivo por algun lado (zombie,
+    // reconectando tarde) sus mensajes quedan descartados por todos a partir
+    // de aca, sin que haya que negociar nada (mismo mecanismo que ya usan los
+    // latidos de fase para ignorar mensajes de un host viejo).
+    this.epoch++;
+    this.missingSince.clear();
+    this.eliminatedByDisconnect.clear();
+    // Fuerza un latido inmediato en vez de esperar hasta PHASE_HEARTBEAT_MS:
+    // la transicion tiene que ser corta.
+    this.lastPhaseBroadcast = 0;
+    if (this.phase !== 'idle' && this.phase !== 'matchEnd') this.heartbeat();
+    this.emit();
+  }
+
+  /**
+   * Presencia en vivo de la sala. Solo el host la usa (para detectar
+   * desconexiones); en los demas clientes no tiene efecto, asi que es seguro
+   * llamarla siempre, sea o no quien tenga la autoridad en este momento.
+   */
+  setConnected(ids: ReadonlySet<string>): void {
+    this.connectedIds = new Set(ids);
+    this.connectedKnown = true;
   }
 
   /** Fraccion de tick ya transcurrida, para que el render interpole. */
@@ -195,7 +279,7 @@ export class MatchSession {
 
   /** Solo el host. Arranca la primera ronda. */
   beginMatch(): void {
-    if (!this.opts.isHost) return;
+    if (!this.isHost) return;
     this.totals = {};
     this.stats = {};
     this.round = 0;
@@ -218,6 +302,10 @@ export class MatchSession {
     this.myObjectPlaced = false;
     this.roundResult = null;
     this.earlyFinishScheduled = false;
+    // La deteccion de desconexion es por ronda: alguien que se fue en la
+    // anterior puede volver a jugar si la sala le mantuvo el lugar (§10).
+    this.missingSince.clear();
+    this.eliminatedByDisconnect.clear();
     this.phase = 'chaosBox';
     this.deadline = this.clock.now() + CHAOSBOX_MS;
     this.rebuildPreview();
@@ -238,7 +326,7 @@ export class MatchSession {
     this.phase = 'countdown';
     this.startAt = this.clock.now() + COUNTDOWN_MS;
     this.inputEverSent = false;
-    this.sim = new RollbackSim(MAP_ASCENSO, this.roster, this.placedObjects);
+    this.sim = new RollbackSim(this.map, this.roster, this.placedObjects);
     this.broadcastPhase();
     this.emit();
   }
@@ -248,7 +336,7 @@ export class MatchSession {
    * ve el mapa con todo lo que hay colocado hasta ahora.
    */
   private rebuildPreview(): void {
-    this.sim = new RollbackSim(MAP_ASCENSO, this.roster, this.placedObjects);
+    this.sim = new RollbackSim(this.map, this.roster, this.placedObjects);
   }
 
   private broadcastPhase(): void {
@@ -260,6 +348,7 @@ export class MatchSession {
       startAt: this.startAt,
       raceTicks: this.raceTicks,
       round: this.round,
+      mapId: this.map.id,
       target: this.targetPoints,
       totals: this.totals,
       seed: this.seed,
@@ -295,7 +384,7 @@ export class MatchSession {
       this.channel.send({ t: 'ping', u: this.opts.userId, c: this.clock.localNow() });
     }
 
-    if (this.opts.isHost) this.heartbeat();
+    if (this.isHost) this.heartbeat();
 
     if (this.phase === 'idle' || this.phase === 'matchEnd') {
       this.emit();
@@ -304,7 +393,7 @@ export class MatchSession {
 
     if (this.phase === 'roundResults') {
       // El host es quien decide cuando arranca la ronda siguiente.
-      if (this.opts.isHost && this.clock.now() >= this.nextAt) {
+      if (this.isHost && this.clock.now() >= this.nextAt) {
         if (this.roundResult?.last) this.endMatch();
         else this.beginRound();
       }
@@ -314,7 +403,7 @@ export class MatchSession {
 
     // Elegir y colocar: nadie se mueve, solo corre el reloj de la fase.
     if (this.phase === 'chaosBox' || this.phase === 'placement') {
-      if (this.opts.isHost) {
+      if (this.isHost) {
         this.maybeFinishEarly();
         if (this.clock.now() >= this.deadline) {
           if (this.phase === 'chaosBox') this.beginPlacement();
@@ -338,7 +427,10 @@ export class MatchSession {
 
     this.sim.advanceTo(Math.min(Math.floor(elapsed / MS_PER_TICK), this.raceTicks));
 
-    if (this.opts.isHost) this.maybeKeyframe();
+    if (this.isHost) {
+      this.checkDisconnections();
+      this.maybeKeyframe();
+    }
 
     if (everyoneDone(this.sim.world) || this.sim.tick >= this.raceTicks) this.finishRound();
 
@@ -385,6 +477,51 @@ export class MatchSession {
     if (soon < this.deadline) {
       this.deadline = soon;
       this.broadcastPhase();
+    }
+  }
+
+  /**
+   * Detecta jugadores desconectados durante la carrera y los elimina de la
+   * ronda por ellos (§24: "queda eliminado de esa ronda"). Solo la corre el
+   * host (via `pump`). Usa la MISMA presencia que ya alimenta la eleccion de
+   * host del lobby (`setConnected`), asi que no abre ninguna conexion nueva
+   * y hereda su tolerancia natural a parpadeos de red.
+   *
+   * Requiere ausencia sostenida por `PLAYER_TIMEOUT_MS`: un microcorte no
+   * alcanza, tiene que ser una desconexion real y sostenida.
+   */
+  private checkDisconnections(): void {
+    // Sin datos de presencia todavia (o una lectura vacia de mas: mejor no
+    // eliminar a nadie por las dudas que confirmar en base a nada).
+    if (!this.connectedKnown || this.connectedIds.size === 0) return;
+
+    const now = this.clock.localNow();
+    for (const id of this.roster) {
+      if (id === this.opts.userId) continue; // uno mismo siempre esta "conectado"
+      if (this.eliminatedByDisconnect.has(id)) continue;
+
+      const player = this.sim.world.players.find((p) => p.id === id);
+      if (!player || player.phase !== 'racing') continue; // ya termino/murio por otra razon
+
+      if (this.connectedIds.has(id)) {
+        this.missingSince.delete(id);
+        continue;
+      }
+
+      const since = this.missingSince.get(id);
+      if (since === undefined) {
+        this.missingSince.set(id, now);
+        continue;
+      }
+      if (now - since < PLAYER_TIMEOUT_MS) continue;
+
+      // Desconexion confirmada: se elimina como si se hubiera rendido, con
+      // el mismo mecanismo (queda ghost, sin premios, no bloquea el round).
+      this.eliminatedByDisconnect.add(id);
+      this.missingSince.delete(id);
+      const tick = this.sim.tick;
+      this.sim.eliminate(id, tick);
+      this.channel.send({ t: 'left', u: id, k: tick });
     }
   }
 
@@ -467,7 +604,7 @@ export class MatchSession {
       last,
     };
 
-    if (this.opts.isHost) {
+    if (this.isHost) {
       this.channel.send(this.roundResult);
       this.opts.onRoundEnd?.();
     }
@@ -516,7 +653,7 @@ export class MatchSession {
     const offer = this.offers.find((o) => o.id === offerId);
     if (!offer || offer.takenBy) return;
 
-    if (this.opts.isHost) this.resolvePick(offerId, this.opts.userId);
+    if (this.isHost) this.resolvePick(offerId, this.opts.userId);
     else this.channel.send({ t: 'pick', u: this.opts.userId, offer: offerId });
   }
 
@@ -548,7 +685,7 @@ export class MatchSession {
       y,
       rotation,
     };
-    const valid = checkPlacement(candidate, MAP_ASCENSO, this.placedObjects).valid;
+    const valid = checkPlacement(candidate, this.map, this.placedObjects).valid;
     this.ghosts.set(this.opts.userId, {
       userId: this.opts.userId,
       type: offer.type,
@@ -589,7 +726,7 @@ export class MatchSession {
       y,
       rotation,
     };
-    if (!checkPlacement(obj, MAP_ASCENSO, this.placedObjects).valid) return false;
+    if (!checkPlacement(obj, this.map, this.placedObjects).valid) return false;
 
     this.applyPlacement(obj);
     this.myObjectPlaced = true;
@@ -622,13 +759,14 @@ export class MatchSession {
     this.applySurrender(this.opts.userId, tick);
   }
 
+  /**
+   * Va por `RollbackSim.eliminate`, no por una mutacion directa: rendirse
+   * pasa "fuera de banda" del historial de replay, asi que si despues llega
+   * un input tardio de otro jugador y dispara un rollback, hay que poder
+   * reaplicarla o el jugador rendido resucitaria al recalcular el pasado.
+   */
   private applySurrender(id: string, tick: number): void {
-    const p = this.sim.world.players.find((x) => x.id === id);
-    if (!p || p.phase !== 'racing') return;
-    p.phase = 'dead';
-    p.endTick = tick;
-    p.vx = 0;
-    p.vy = 0;
+    this.sim.eliminate(id, tick);
   }
 
   private onMessage(m: NetMessage): void {
@@ -638,7 +776,7 @@ export class MatchSession {
         break;
 
       case 'ping':
-        if (this.opts.isHost) {
+        if (this.isHost) {
           this.channel.send({ t: 'pong', to: m.u, c: m.c, h: this.clock.now() });
         }
         break;
@@ -684,7 +822,7 @@ export class MatchSession {
 
       case 'pick':
         // Solo el host reparte: es el unico que ve un orden unico de llegada.
-        if (this.opts.isHost) this.resolvePick(m.offer, m.u);
+        if (this.isHost) this.resolvePick(m.offer, m.u);
         break;
 
       case 'taken': {
@@ -715,9 +853,15 @@ export class MatchSession {
         this.applySurrender(m.u, m.k);
         break;
 
+      case 'left':
+        // El host detecto una desconexion y la reparte: mismo efecto que
+        // rendirse, para todos por igual (§24).
+        this.sim.eliminate(m.u, m.k);
+        break;
+
       case 'hello':
         // Alguien acaba de llegar: el host le cuenta en que anda la partida.
-        if (this.opts.isHost && this.phase !== 'idle') {
+        if (this.isHost && this.phase !== 'idle') {
           this.broadcastPhase();
           const snap = this.sim.snapshot();
           this.channel.send({ t: 'key', e: this.epoch, tick: snap.tick, players: snap.players });
@@ -764,6 +908,18 @@ export class MatchSession {
       PHASE_ORDER.indexOf(this.phase) > PHASE_ORDER.indexOf(m.phase) &&
       m.phase !== 'roundResults';
 
+    // El mapa se fija una sola vez al construir la sesion (§11) y todos lo
+    // resuelven de la MISMA fila de `rooms` antes de arrancar, asi que este
+    // caso no deberia poder pasar nunca en la practica. Se deja detectado y
+    // registrado en vez de ignorado en silencio, por si alguna vez aparece
+    // (una sala vieja con un mapId que ya no existe, una version desalineada).
+    if (m.mapId !== this.map.id) {
+      console.error(
+        `PIXEL RUMBLE: mapId no coincide (yo: "${this.map.id}", mensaje: "${m.mapId}"). ` +
+          'No se cambia el mapa en medio de la partida; revisa la version del cliente.',
+      );
+    }
+
     this.epoch = m.e;
     this.raceTicks = m.raceTicks;
     this.round = m.round;
@@ -804,7 +960,7 @@ export class MatchSession {
     if (m.phase === 'countdown') {
       this.placedObjects = m.objects;
       this.ghosts.clear();
-      this.sim = new RollbackSim(MAP_ASCENSO, m.players, m.objects);
+      this.sim = new RollbackSim(this.map, m.players, m.objects);
       this.roundResult = null;
       this.scoredRound = 0;
       this.inputEverSent = false;

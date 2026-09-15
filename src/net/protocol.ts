@@ -64,6 +64,13 @@ export interface PhaseMsg {
   raceTicks: number;
   /** Ronda actual, empezando en 1. */
   round: number;
+  /**
+   * Que mapa juega esta partida (§9). Viaja por protocolo para que un
+   * cliente que se reconecta o un espectador promovido lo confirme sin tener
+   * que volver a leer la sala; cada cliente resuelve el mismo mapId contra su
+   * propio registry local, asi que nunca se manda la geometria por red.
+   */
+  mapId: string;
   /** Puntos necesarios para ganar la partida. */
   target: number;
   /** Puntos acumulados hasta ahora, para que nadie quede desfasado. */
@@ -161,6 +168,18 @@ export interface SurrenderMsg {
   k: number;
 }
 
+/**
+ * El host detecto que un jugador se desconecto en plena carrera y lo elimina
+ * de la ronda por el. Mismo efecto que `SurrenderMsg`, pero lo emite el host
+ * (§24: "queda eliminado de esa ronda") porque quien se fue ya no puede
+ * avisar por si mismo.
+ */
+export interface PlayerLeftMsg {
+  t: 'left';
+  u: string;
+  k: number;
+}
+
 /** Alguien acaba de entrar al canal y pide una foto del estado. */
 export interface HelloMsg {
   t: 'hello';
@@ -181,4 +200,5 @@ export type NetMessage =
   | GhostMsg
   | PlacedMsg
   | SurrenderMsg
+  | PlayerLeftMsg
   | HelloMsg;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MAP_ASCENSO } from '../src/core/map';
+import { MAP_ASCENSO } from '../src/core/maps/ascenso';
 import { RollbackSim } from '../src/net/RollbackSim';
 import type { InputState } from '../src/core/types';
 import { input } from './helpers';
@@ -129,5 +129,95 @@ describe('RollbackSim', () => {
     sim.advanceTo(30);
     expect(sim.prev.length).toBe(IDS.length);
     expect(sim.prev[0]!.x).not.toBe(sim.world.players[0]!.x);
+  });
+});
+
+/**
+ * Eliminacion "fuera de banda" (rendirse, desconexion).
+ *
+ * A diferencia de un input, esto no pasa por el historial de replay normal:
+ * es una mutacion directa que tiene que sobrevivir a un rollback aunque el
+ * rollback rebobine a un momento anterior a la eliminacion.
+ */
+describe('eliminate (rendirse / desconexion)', () => {
+  it('elimina de inmediato a un jugador que sigue corriendo', () => {
+    const sim = new RollbackSim(MAP_ASCENSO, IDS);
+    sim.advanceTo(50);
+    sim.eliminate('b', sim.tick);
+
+    const b = sim.world.players.find((p) => p.id === 'b')!;
+    expect(b.phase).toBe('dead');
+    expect(b.endTick).toBe(50);
+    expect(b.vx).toBe(0);
+    expect(b.vy).toBe(0);
+  });
+
+  it('un input tardio de OTRO jugador no resucita al eliminado (el bug que se corrigio)', () => {
+    const sim = new RollbackSim(MAP_ASCENSO, IDS);
+    sim.advanceTo(80);
+    sim.eliminate('b', 80);
+    expect(sim.world.players.find((p) => p.id === 'b')!.phase).toBe('dead');
+
+    // Llega un input de 'a' con un tick anterior a la eliminacion de 'b':
+    // esto dispara un rewindTo por debajo del tick 80 y vuelve a avanzar.
+    sim.applyInput('a', 20, input({ right: true }));
+    expect(sim.rollbackCount).toBeGreaterThan(0);
+
+    // 'b' tiene que seguir eliminado despues del rebobinado, no volver a 'racing'.
+    const b = sim.world.players.find((p) => p.id === 'b')!;
+    expect(b.phase).toBe('dead');
+    expect(b.endTick).toBe(80);
+  });
+
+  it('un input del propio eliminado, aunque llegue despues, no lo hace moverse', () => {
+    const sim = new RollbackSim(MAP_ASCENSO, IDS);
+    sim.advanceTo(60);
+    sim.eliminate('c', 60);
+    const frozenX = sim.world.players.find((p) => p.id === 'c')!.x;
+
+    // Le sigue llegando un input suyo (por ejemplo, el ultimo que solto antes
+    // de irse) para un tick posterior a su eliminacion: no debe moverlo,
+    // porque un jugador 'dead' ni siquiera lee su input en cada step.
+    sim.applyInput('c', sim.tick + 5, input({ right: true }));
+    sim.advanceTo(120);
+
+    const c = sim.world.players.find((p) => p.id === 'c')!;
+    expect(c.phase).toBe('dead');
+    expect(c.endTick).toBe(60);
+    expect(c.x).toBe(frozenX);
+  });
+
+  it('programada para un tick futuro, se aplica recien cuando la simulacion llega ahi', () => {
+    const sim = new RollbackSim(MAP_ASCENSO, IDS);
+    sim.eliminate('a', 100);
+    sim.advanceTo(50);
+    expect(sim.world.players.find((p) => p.id === 'a')!.phase).toBe('racing');
+
+    sim.advanceTo(100);
+    expect(sim.world.players.find((p) => p.id === 'a')!.phase).toBe('dead');
+  });
+
+  it('es idempotente: la primera eliminacion registrada gana', () => {
+    const sim = new RollbackSim(MAP_ASCENSO, IDS);
+    sim.advanceTo(40);
+    sim.eliminate('a', 40);
+    sim.eliminate('a', 999); // llega despues, por ejemplo un 'left' duplicado
+    expect(sim.world.players.find((p) => p.id === 'a')!.endTick).toBe(40);
+  });
+
+  it('no revive a nadie ni duplica jugadores al aplicar un keyframe', () => {
+    const sim = new RollbackSim(MAP_ASCENSO, IDS);
+    sim.advanceTo(70);
+    sim.eliminate('b', 70);
+    const before = sim.world.players.length;
+
+    // Keyframe de otro cliente que, por lo que sea, todavia tiene a 'b' vivo.
+    const stale = sim
+      .snapshot()
+      .players.map((p) => (p.id === 'b' ? { ...p, phase: 'racing' as const, endTick: -1 } : p));
+    sim.applyKeyframe(70, stale);
+
+    expect(sim.world.players.length).toBe(before);
+    expect(sim.world.players.find((p) => p.id === 'b')!.phase).toBe('dead');
   });
 });

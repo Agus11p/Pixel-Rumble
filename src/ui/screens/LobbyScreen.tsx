@@ -1,9 +1,16 @@
 import type { JSX } from 'react';
 import { useState } from 'react';
 import { PLAYER_COLORS, colorHex } from '../../rooms/colors';
-import { ERROR_MESSAGES, RoomError, setColor, setConfig, startMatch } from '../../rooms/roomsApi';
+import { ERROR_MESSAGES, RoomError, setColor, setConfig, setMap, startMatch } from '../../rooms/roomsApi';
 import type { RoomSession } from '../../rooms/useRoomSession';
-import { MAX_PLAYERS, MIN_PLAYERS_TO_START, TARGET_OPTIONS, TIME_OPTIONS } from '../../rooms/types';
+import {
+  MAP_LABELS,
+  MAP_OPTIONS,
+  MAX_PLAYERS,
+  MIN_PLAYERS_TO_START,
+  TARGET_OPTIONS,
+  TIME_OPTIONS,
+} from '../../rooms/types';
 import { OptionRow } from '../components/OptionRow';
 
 interface Props {
@@ -44,6 +51,15 @@ export function LobbyScreen({ session, userId, onLeave }: Props): JSX.Element {
     setActionError(null);
     try {
       await setConfig(roomId, target, seconds);
+    } catch (e) {
+      fail(e);
+    }
+  }
+
+  async function changeMap(nextMapId: string): Promise<void> {
+    setActionError(null);
+    try {
+      await setMap(roomId, nextMapId);
     } catch (e) {
       fail(e);
     }
@@ -114,6 +130,14 @@ export function LobbyScreen({ session, userId, onLeave }: Props): JSX.Element {
         </div>
       )}
 
+      <OptionRow
+        label="MAPA"
+        options={MAP_OPTIONS}
+        value={room.mapId}
+        disabled={!isHost}
+        onChange={(m) => void changeMap(m)}
+        formatOption={(id) => MAP_LABELS[id] ?? id}
+      />
       <OptionRow
         label="PUNTOS PARA GANAR"
         options={TARGET_OPTIONS}

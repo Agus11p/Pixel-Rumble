@@ -1,5 +1,5 @@
 import { MS_PER_TICK } from '../core/constants';
-import { MAP_ASCENSO } from '../core/map';
+import { DEFAULT_MAP_ID, resolveMap } from '../core/maps/registry';
 import { cloneWorldState, createWorld, resetWorld, step } from '../core/simulation';
 import type { InputState, PlayerState, World } from '../core/types';
 import type { MatchSession } from '../net/MatchSession';
@@ -28,11 +28,16 @@ const MAX_TICKS_PER_FRAME = 8;
 
 /** Un jugador, sin red. Es el prototipo con el que se ajusta la fisica. */
 export class LocalDriver implements GameDriver {
-  readonly world: World = createWorld(MAP_ASCENSO, ['local']);
-  prev: PlayerState[] = cloneWorldState(this.world);
+  readonly world: World;
+  prev: PlayerState[];
   alpha = 0;
 
   private accumulator = 0;
+
+  constructor(mapId: string = DEFAULT_MAP_ID) {
+    this.world = createWorld(resolveMap(mapId), ['local']);
+    this.prev = cloneWorldState(this.world);
+  }
 
   update(input: InputState, elapsedMs: number): void {
     this.accumulator += Math.min(elapsedMs, MAX_FRAME_MS);

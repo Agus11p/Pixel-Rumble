@@ -1109,3 +1109,7 @@ code {
   color: #ffd98a;
   border: 1px dashed #8e4a10;
 }
+
+.match-host-warning {
+  color: #ffd98a;
+}

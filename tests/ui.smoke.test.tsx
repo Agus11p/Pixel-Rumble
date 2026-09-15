@@ -37,6 +37,7 @@ describe('UI', () => {
         id: 'r1',
         code: 'K7P2',
         hostId: 'u1',
+        mapId: 'ASCENSO',
         targetPoints: 2000,
         roundSeconds: 60,
         status: 'lobby',

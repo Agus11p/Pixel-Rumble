@@ -1,7 +1,7 @@
 import type { JSX } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { TICK_RATE, VIRTUAL_H, VIRTUAL_W } from '../../core/constants';
-import { MAP_ASCENSO } from '../../core/map';
+import { isValidMapId } from '../../core/maps/registry';
 import { objectType } from '../../core/objects/catalog';
 import { snapPlacement } from '../../core/objects/placement';
 import { scoreRound, standings, totalsBeforeRound, winners } from '../../core/scoring';
@@ -23,6 +23,8 @@ interface Props {
   room: Room;
   players: RoomPlayer[];
   userId: string;
+  /** Presencia en vivo de la sala (Supabase Presence, via useRoomSession). */
+  connected: Set<string>;
 }
 
 const INITIAL: MatchSnapshotState = {
@@ -54,7 +56,7 @@ const INITIAL: MatchSnapshotState = {
  * texto dibujado dentro del canvas seria ilegible, y ademas asi la interfaz se
  * adapta al tamano de pantalla sin tocar el juego.
  */
-export function MatchScreen({ room, players, userId }: Props): JSX.Element {
+export function MatchScreen({ room, players, userId, connected }: Props): JSX.Element {
   const hostRef = useRef<HTMLDivElement>(null);
   const sessionRef = useRef<MatchSession | null>(null);
   const gameRef = useRef<Game | null>(null);
@@ -89,10 +91,20 @@ export function MatchScreen({ room, players, userId }: Props): JSX.Element {
     const parent = hostRef.current;
     if (!parent) return;
 
+    // El mapa lo fija la sala (§9): si por lo que sea no esta registrado en
+    // este cliente (una sala vieja, un id con typo, una version desalineada),
+    // se avisa con un error claro y NO se arranca la partida, en vez de
+    // reventar a mitad de construir la sesion.
+    if (!isValidMapId(room.mapId)) {
+      setError(`Mapa desconocido: "${room.mapId}". Actualizá la página e intentá de nuevo.`);
+      return;
+    }
+
     const session = new MatchSession({
       roomId: room.id,
       userId,
       isHost,
+      mapId: room.mapId,
       targetPoints: room.targetPoints,
       roundSeconds: room.roundSeconds,
       // Si justo la lista viene vacia (una recarga a medias), se mantiene la
@@ -138,6 +150,20 @@ export function MatchScreen({ room, players, userId }: Props): JSX.Element {
     // La sesion se crea una vez por partida: que entre o salga gente no la reinicia.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [room.id]);
+
+  // El host de la sala puede cambiar en medio de la partida (el mecanismo de
+  // eleccion ya existe en useRoomSession/hostElection y sigue funcionando
+  // durante la carrera). Cuando eso pasa, la sesion lo asume sin reiniciar
+  // nada: no crea un MatchSession nuevo, no recrea el canvas ni el mundo.
+  useEffect(() => {
+    sessionRef.current?.setHost(room.hostId === userId);
+  }, [room.hostId, userId]);
+
+  // Presencia en vivo: el host la usa para detectar jugadores desconectados
+  // durante la carrera (§24). En los demas clientes no tiene efecto.
+  useEffect(() => {
+    sessionRef.current?.setConnected(connected);
+  }, [connected]);
 
   // Los colores se refrescan aparte, sin tocar la simulacion.
   useEffect(() => {
@@ -191,7 +217,7 @@ export function MatchScreen({ room, players, userId }: Props): JSX.Element {
 
       const vx = ((clientX - rect.left) / rect.width) * VIRTUAL_W;
       const vy = ((clientY - rect.top) / rect.height) * VIRTUAL_H - lift;
-      const { x, y } = snapPlacement(offer.type, rotation, vx, vy, MAP_ASCENSO, objectsRef.current);
+      const { x, y } = snapPlacement(offer.type, rotation, vx, vy, session.map, objectsRef.current);
 
       ghostPos.current = { x, y };
       session.updateGhost(x, y, rotation);
@@ -225,7 +251,7 @@ export function MatchScreen({ room, players, userId }: Props): JSX.Element {
     const type = objectType(offer.type)!;
     const cx = ghostPos.current.x + (rotation === 1 ? type.h : type.w) / 2;
     const cy = ghostPos.current.y + (rotation === 1 ? type.w : type.h) / 2;
-    const pos = snapPlacement(offer.type, next, cx, cy, MAP_ASCENSO, objectsRef.current);
+    const pos = snapPlacement(offer.type, next, cx, cy, session.map, objectsRef.current);
     ghostPos.current = pos;
     session.updateGhost(pos.x, pos.y, next);
   }
@@ -273,10 +299,12 @@ export function MatchScreen({ room, players, userId }: Props): JSX.Element {
           <ul className="match-players">
             {racers.map((p) => {
               const sim = state.roundResult?.outcomes.find((o) => o.id === p.userId);
+              const playerOffline = p.userId !== userId && !connected.has(p.userId);
               return (
                 <li key={p.userId} className={racing && sim ? sim.phase : ''}>
                   <span className="player-dot" style={{ background: colorHex(p.color) }} />
                   <span className="match-player-name">{p.name}</span>
+                  {playerOffline && <span className="tag tag-off">SIN CONEXIÓN</span>}
                   <span className="match-score">{state.totals[p.userId] ?? 0}</span>
                 </li>
               );
@@ -286,6 +314,10 @@ export function MatchScreen({ room, players, userId }: Props): JSX.Element {
 
         {!state.ready && state.phase !== 'idle' && !building && (
           <p className="match-note">Sincronizando reloj…</p>
+        )}
+
+        {state.phase !== 'idle' && !connected.has(room.hostId) && (
+          <p className="match-note match-host-warning">Host desconectado — reasignando…</p>
         )}
 
         {state.phase === 'countdown' && (

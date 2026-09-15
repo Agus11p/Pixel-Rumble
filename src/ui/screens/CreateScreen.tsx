@@ -1,13 +1,14 @@
 import { useState } from 'react';
 import { createRoom, ERROR_MESSAGES, RoomError } from '../../rooms/roomsApi';
 import { SCORING } from '../../core/scoring';
-import { TARGET_OPTIONS, TIME_OPTIONS } from '../../rooms/types';
+import { DEFAULT_MAP_ID, MAP_LABELS, MAP_OPTIONS, TARGET_OPTIONS, TIME_OPTIONS } from '../../rooms/types';
 import { useAppStore } from '../../store/appStore';
 import { OptionRow } from '../components/OptionRow';
 import type { JSX } from 'react';
 
 export function CreateScreen(): JSX.Element {
   const { playerName, setScreen, enterRoom } = useAppStore();
+  const [mapId, setMapId] = useState<string>(DEFAULT_MAP_ID);
   const [target, setTarget] = useState<number>(SCORING.targetDefault);
   const [seconds, setSeconds] = useState(60);
   const [password, setPassword] = useState('');
@@ -21,6 +22,7 @@ export function CreateScreen(): JSX.Element {
       const { roomId } = await createRoom({
         name: playerName.trim(),
         password,
+        mapId,
         targetPoints: target,
         roundSeconds: seconds,
       });
@@ -35,6 +37,13 @@ export function CreateScreen(): JSX.Element {
     <div className="screen">
       <h2 className="screen-title-text">CREAR SALA</h2>
 
+      <OptionRow
+        label="MAPA"
+        options={MAP_OPTIONS}
+        value={mapId}
+        onChange={setMapId}
+        formatOption={(id) => MAP_LABELS[id] ?? id}
+      />
       <OptionRow
         label="PUNTOS PARA GANAR"
         options={TARGET_OPTIONS}

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { COYOTE_TICKS, JUMP_SPEED, MAX_FALL, PLAYER_H, TICK_RATE } from '../src/core/constants';
-import { MAP_ASCENSO } from '../src/core/map';
+import { MAP_ASCENSO } from '../src/core/maps/ascenso';
 import { createWorld, everyoneDone, resetWorld, step } from '../src/core/simulation';
 import { P, input, minY, run, runUntil, solo } from './helpers';
 

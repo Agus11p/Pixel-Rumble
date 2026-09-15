@@ -18,8 +18,24 @@ export class ClockSync {
   private offset = 0;
   private readonly samples: number[] = [];
   private lastPing = 0;
+  private isHost: boolean;
 
-  constructor(private readonly isHost: boolean) {}
+  constructor(isHost: boolean) {
+    this.isHost = isHost;
+  }
+
+  /**
+   * Cambia si este reloj es ahora la referencia (migracion de host).
+   *
+   * A proposito NO se toca `offset`: ya estaba calibrado contra el reloj del
+   * host anterior mientras este cliente era comun, asi que `now()` sigue
+   * devolviendo prácticamente lo mismo en el instante de la transicion. Eso
+   * es lo que hace que la migracion no salte el countdown ni los timers de
+   * fase - la continuidad del reloj no depende de quien sea el host.
+   */
+  setHost(isHost: boolean): void {
+    this.isHost = isHost;
+  }
 
   /** Tiempo local monotono. */
   localNow(): number {

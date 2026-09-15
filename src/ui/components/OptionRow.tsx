@@ -1,21 +1,24 @@
 import type { JSX } from 'react';
-interface Props<T extends number> {
+interface Props<T extends number | string> {
   label: string;
   options: readonly T[];
-  value: T | number;
+  value: T;
   onChange: (value: T) => void;
   suffix?: string;
   disabled?: boolean;
+  /** Texto a mostrar por opcion. Por defecto, la opcion misma (ej. "60"). */
+  formatOption?: (opt: T) => string;
 }
 
 /** Selector de opciones fijas, en formato de videojuego (no un <select>). */
-export function OptionRow<T extends number>({
+export function OptionRow<T extends number | string>({
   label,
   options,
   value,
   onChange,
   suffix = '',
   disabled = false,
+  formatOption,
 }: Props<T>): JSX.Element {
   return (
     <div className="option-row">
@@ -28,7 +31,7 @@ export function OptionRow<T extends number>({
             onClick={() => onChange(opt)}
             disabled={disabled}
           >
-            {opt}
+            {formatOption ? formatOption(opt) : opt}
             {suffix}
           </button>
         ))}

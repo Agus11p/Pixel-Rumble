@@ -1,3 +1,4 @@
+import { DEFAULT_MAP_ID } from '../core/maps/registry';
 import { supabase } from './supabase';
 import type { Room, RoomPlayer } from './types';
 
@@ -11,6 +12,7 @@ export type RoomErrorCode =
   | 'NOT_A_PLAYER'
   | 'CODE_EXHAUSTED'
   | 'NEED_MORE_PLAYERS'
+  | 'INVALID_MAP'
   | 'UNKNOWN';
 
 const KNOWN_CODES: RoomErrorCode[] = [
@@ -23,6 +25,7 @@ const KNOWN_CODES: RoomErrorCode[] = [
   'NOT_A_PLAYER',
   'CODE_EXHAUSTED',
   'NEED_MORE_PLAYERS',
+  'INVALID_MAP',
 ];
 
 export class RoomError extends Error {
@@ -52,6 +55,7 @@ export const ERROR_MESSAGES: Record<RoomErrorCode, string> = {
   NOT_A_PLAYER: 'Los espectadores no pueden hacer eso.',
   CODE_EXHAUSTED: 'No se pudo generar un código libre. Probá de nuevo.',
   NEED_MORE_PLAYERS: 'Hacen falta al menos 2 jugadores para empezar.',
+  INVALID_MAP: 'Ese mapa no es válido.',
   UNKNOWN: 'Algo salió mal. Probá de nuevo.',
 };
 
@@ -59,6 +63,7 @@ interface RoomRow {
   id: string;
   code: string;
   host_id: string;
+  map_id: string;
   target_points: number;
   round_seconds: number;
   status: string;
@@ -78,6 +83,9 @@ export function mapRoom(row: RoomRow): Room {
     id: row.id,
     code: row.code,
     hostId: row.host_id,
+    // Compatibilidad con salas creadas antes del sistema de mapas (§13): si
+    // la columna llegara nula por lo que sea, ASCENSO es un fallback valido.
+    mapId: row.map_id ?? DEFAULT_MAP_ID,
     targetPoints: row.target_points,
     roundSeconds: row.round_seconds,
     status: row.status === 'in_match' ? 'in_match' : 'lobby',
@@ -98,12 +106,14 @@ function mapPlayer(row: PlayerRow): RoomPlayer {
 export async function createRoom(params: {
   name: string;
   password?: string;
+  mapId: string;
   targetPoints: number;
   roundSeconds: number;
 }): Promise<{ roomId: string; code: string }> {
   const { data, error } = await supabase().rpc('create_room', {
     p_name: params.name,
     p_password: params.password?.trim() || null,
+    p_map: params.mapId,
     p_target: params.targetPoints,
     p_seconds: params.roundSeconds,
   });
@@ -132,7 +142,7 @@ export async function joinRoom(params: {
 export async function fetchRoom(roomId: string): Promise<Room | null> {
   const { data, error } = await supabase()
     .from('rooms')
-    .select('id, code, host_id, target_points, round_seconds, status')
+    .select('id, code, host_id, map_id, target_points, round_seconds, status')
     .eq('id', roomId)
     .maybeSingle();
   if (error) throw toRoomError(error);
@@ -160,6 +170,12 @@ export async function setConfig(roomId: string, target: number, seconds: number)
     p_target: target,
     p_seconds: seconds,
   });
+  if (error) throw toRoomError(error);
+}
+
+/** Solo el host, y solo mientras la sala esta en el lobby (§4). */
+export async function setMap(roomId: string, mapId: string): Promise<void> {
+  const { error } = await supabase().rpc('set_map', { p_room: roomId, p_map: mapId });
   if (error) throw toRoomError(error);
 }
 
